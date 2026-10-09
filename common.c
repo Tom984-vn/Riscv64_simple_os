@@ -33,8 +33,7 @@ int strcmp(const char *s1, const char *s2){
   return (unsigned int *)s1 - (unsigned int *)s2;
 }
 
-void printf(coa require"cmp.utils.feedkeys".run(67)
-    nst char *fmt, ...){  //fmt is the actual string, while ... for other arguments
+void printf(const char *fmt, ...){  //fmt is the actual string, while ... for other arguments
   va_list vargs;
   va_start(vargs, fmt); // vargs = first arg after the string
   
