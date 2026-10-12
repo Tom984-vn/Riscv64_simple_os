@@ -1,6 +1,9 @@
 #include "kernel.h"
 #include "common.h"
 
+//------predefined----------
+void yield(void);
+
 extern char __bss[], __bss_end[], __stack_top[];
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3,long arg4, long arg5, long fid, long eid){ // does riscv64 need long long?
@@ -22,6 +25,11 @@ struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3,long arg4, lon
   return (struct sbiret){.error = a0, .value = a1};
 }
 
+void putchar(char ch) {
+    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
+}
+
+void printf(const char *fmt, ...);
 extern char __free_ram[], __end_of_ram[];
 paddr_t alloc_page(uint32_t n){
   static paddr_t next_paddr = (paddr_t) __free_ram; //next_paddr is global var
@@ -33,8 +41,6 @@ paddr_t alloc_page(uint32_t n){
   memset((void *) paddr, 0 , n * PAGE_SIZE);
   return paddr;
 }
-
-#include <stdint.h>
 
 __attribute__((naked)) void switch_context(uint64_t *prev_sp,
                                            uint64_t *next_sp) {
@@ -76,22 +82,102 @@ __attribute__((naked)) void switch_context(uint64_t *prev_sp,
         "ret\n"
     );
 }
+// --------------- CREATE PROCESS-----------------------
+struct process procs[PROCS_MAX];
 
+struct process *create_process(uint64_t pc){
+  struct process *proc = NULL;
+  int i;
+  for (i = 0; i < PROCS_MAX; i++){
+    if (procs[i].state == PROC_UNUSED){
+    proc = &procs[i]; //nếu tìm được proc chưa dùng thì tạo ở đấy
+    break;
+    }
+  }
 
-void putchar(char ch) {
-    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
+  if (!proc) PANIC("no free proc slots");
+  uint64_t *sp = (uint64_t *) &proc -> stack[sizeof(proc->stack)]; // đối với proc hiện tại, trả về địa chỉ đáy của stack cho sp
+  *--sp = 0;               // padding (để frame đủ 14 words = 112 bytes, căn chỉnh 16 bytes)
+  *--sp = 0;               // s11                         
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                                        
+  *--sp = 0;                // s0                       
+  *--sp = (uint64_t) pc;    //ra
+
+  proc->pid = i+1;
+  proc->state = PROC_USED;
+  proc->sp = (uint64_t) sp;
+  return proc;
 }
 
-void printf(const char *fmt, ...);
+//------ testing proc -----------------
 
+void delay(void){
+  for(int i = 0; i < 1e7; i++){
+    __asm__ __volatile__("nop");
+  }
+}
+
+struct process *proc_a;
+struct process *proc_b;
+
+void proc_a_entry(void){
+  printf("starting process A\n");
+  while(1){
+    putchar('A');
+    yield();
+  }
+}
+
+void proc_b_entry(void){
+  printf("starting process B\n");
+  while(1){
+    putchar('B');
+    yield();
+  }
+}
+// ---------- scheduler -----------------
+struct process *current_proc;
+struct process *idle_proc;
+
+void yield(void){ //give the CPU to another process
+  struct process *next = idle_proc;
+  for(int i = 0; i < PROCS_MAX; i++){
+    struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+    if (proc->state == PROC_USED && proc->pid > 0) {
+      next = proc;
+      break;
+    }
+  }
+
+  if (next == current_proc) return; //no runnable proc left
+
+  __asm__ __volatile__(
+      "csrw sscratch, %[sscratch]\n"
+      :
+      : [sscratch] "r" ((uint64_t) &next->stack[sizeof(next->stack)]) //lưu tạm thời đáy của stack proc đang chạy hiện tại
+      );
+  
+  struct process *prev = current_proc;
+  current_proc = next;
+  switch_context(&prev->sp, &next->sp);
+}
 __attribute__((aligned(4))) // stvec 2 first bit is always 00 (or divideable by 4)
                             // https://docs.riscv.org/reference/isa/priv/supervisor.html#12-1-1-2-supervisor-trap-vector-base-address-stvec-register
 __attribute__((naked))
 void kernel_entry(void) {
     __asm__ __volatile__(
-        "csrw sscratch, sp\n"
+        "csrrw sp, sscratch, sp\n" //retrive kernel stack of the running proc from sscratch
 
-        "addi sp, sp, -8 * 32\n"
+        "addi sp, sp, -8 * 31\n"
 
         "sd ra,  8 * 0(sp)\n"
         "sd gp,  8 * 1(sp)\n"
@@ -124,11 +210,14 @@ void kernel_entry(void) {
         "sd s10, 8 * 28(sp)\n"
         "sd s11, 8 * 29(sp)\n"
 
-        "csrr a0, sscratch\n"
+        "csrr a0, sscratch\n" //giữ và lưu sp ở thời điểm exception (đã đặt ở trên yield())
         "sd a0, 8 * 30(sp)\n"
 
+        "addi a0, sp, 8 * 31\n" //reset the kernel stack
+        "csrw sscratch, s0\n"
+
         "mv a0, sp\n"
-        "call handle_trap\n"
+        "call handle_trap\n" // Do mỗi proc có stack riêng rồi nên
 
         "ld ra,  8 * 0(sp)\n"
         "ld gp,  8 * 1(sp)\n"
@@ -170,12 +259,17 @@ void kernel_main(void) {
 
     printf("\n\n Hello %s\n", "Muffin");
 
-    paddr_t paddr1 = alloc_page(2);
-    paddr_t paddr2 = alloc_page(1);
-    printf("Page test paddr1=%x\n", paddr1);
-    printf("page test paddr2=%x\n", paddr2);
-
     WRITE_CSR(stvec, (uint64_t) kernel_entry);
+
+    idle_proc = create_process((uint64_t) NULL);
+    idle_proc->pid = 0;
+    current_proc = idle_proc;
+
+    proc_a = create_process((uint64_t) proc_a_entry);
+    proc_b = create_process((uint64_t) proc_b_entry);
+    yield();
+
+    PANIC("switched to idle process");
     __asm__ __volatile__("unimp"); // unimp is pseudo code for csrrw x0, cycle, x0
     for (;;){
       __asm__ __volatile__("wfi");
