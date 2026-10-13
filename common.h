@@ -14,8 +14,8 @@ typedef uint64_t vaddr_t;
 #define true 1
 #define false 0
 #define NULL ((void *) 0)
-#define align_up(value, align)    __builtin_align_up(value, align)
-#define is_aligned(value, align)  __builtin_is_aligned(value, align)
+#define align_up(value, align)    ((__typeof__(value))(((uint64_t)(value) + ((uint64_t)(align) - 1)) & ~((uint64_t)(align) - 1)))
+#define is_aligned(value, align)  (((uint64_t)(value) & ((uint64_t)(align) - 1)) == 0)
 #define offsetof(type, member)    __builtin_offsetof(type, member)
 #define PAGE_SIZE 4096
 

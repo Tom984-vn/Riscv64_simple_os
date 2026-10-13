@@ -64,7 +64,17 @@ struct sbiret {
     long error;
     long value;
 };
+//--------Page table define ------------------
+#define SATP_SV39 (8ull << 60) //SATP is the riscv sys reg for  Supervisor Address Translation and Protection (MODE=8 for Sv39).
+#define PAGE_V  (1 << 0)
+#define PAGE_R  (1 << 1)
+#define PAGE_W  (1 << 2)
+#define PAGE_X  (1 << 3)
+#define PAGE_U  (1 << 4)
 
+#define PAGE_RWX (PAGE_R | PAGE_W | PAGE_X)
+
+//----- PROCESS DEFINE -----------------------
 #define PROCS_MAX 8
 
 #define PROC_USED 1
@@ -74,6 +84,7 @@ struct process {
     int pid;             // Process ID
     int state;           // Process state: PROC_UNUSED or PROC_RUNNABLE
     vaddr_t sp;          // Stack pointer
+    uint64_t *page_table;// pointer to first-level page table (table2)
     uint8_t stack[8192]; // Kernel stack
 };
 

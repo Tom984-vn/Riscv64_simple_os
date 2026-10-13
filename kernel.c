@@ -31,7 +31,7 @@ void putchar(char ch) {
 
 void printf(const char *fmt, ...);
 extern char __free_ram[], __end_of_ram[];
-paddr_t alloc_page(uint32_t n){
+paddr_t alloc_page(uint64_t n){
   static paddr_t next_paddr = (paddr_t) __free_ram; //next_paddr is global var
   paddr_t paddr = next_paddr;
   next_paddr += n * PAGE_SIZE;
@@ -82,7 +82,34 @@ __attribute__((naked)) void switch_context(uint64_t *prev_sp,
         "ret\n"
     );
 }
+// --------------- MAP PAGING --------------------------
+void map_page(uint64_t *table2, uint64_t vaddr, paddr_t paddr, uint64_t flags) {
+  if (!is_aligned(vaddr, PAGE_SIZE))
+    PANIC("unaligned vaddr %x", vaddr);
+
+  if (!is_aligned(paddr, PAGE_SIZE))
+    PANIC("unaligned paddr %x", paddr);
+
+  uint64_t vpn2 = (vaddr >> 30) & 0x1ff;  
+  if ((table2[vpn2] & PAGE_V) == 0){
+    //create the 1st table level page if it doesn't exist
+    uint64_t pt_paddr = alloc_page(1);
+    table2[vpn2] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V; //10 bcos 10 first bit is control flags (10-53 is PPN)
+  }
+
+  uint64_t vpn1 = (vaddr >> 21) & 0x1ff; //2nd lvl page table 
+  uint64_t *table1 = (uint64_t *) ((table2[vpn2] >> 10) * PAGE_SIZE);
+  if ((table1[vpn1] & PAGE_V) == 0){
+    paddr_t pt_paddr = alloc_page(1);
+    table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+  }
+
+  uint64_t vpn0 = (vaddr >> 12) & 0x1ff; //3rd lvl page table
+  uint64_t *table0 = (uint64_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
+  table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
 // --------------- CREATE PROCESS-----------------------
+extern char __kernel_base[];
 struct process procs[PROCS_MAX];
 
 struct process *create_process(uint64_t pc){
@@ -111,10 +138,16 @@ struct process *create_process(uint64_t pc){
   *--sp = 0;                                        
   *--sp = 0;                // s0                       
   *--sp = (uint64_t) pc;    //ra
+                            //
+  uint64_t *page_table = (uint64_t *) alloc_page(1);
+  for(paddr_t paddr = (paddr_t) __kernel_base;
+      paddr < (paddr_t) __end_of_ram; paddr += PAGE_SIZE)
+    map_page(page_table, paddr, paddr, PAGE_RWX);
 
   proc->pid = i+1;
   proc->state = PROC_USED;
   proc->sp = (uint64_t) sp;
+  proc->page_table = page_table;
   return proc;
 }
 
@@ -161,9 +194,13 @@ void yield(void){ //give the CPU to another process
   if (next == current_proc) return; //no runnable proc left
 
   __asm__ __volatile__(
+      "sfence.vma\n" // Đảm bảo mọi lệnh đã hoàn thành 
+      "csrw satp, %[satp]\n"
+      "sfence.vma\n"
       "csrw sscratch, %[sscratch]\n"
       :
-      : [sscratch] "r" ((uint64_t) &next->stack[sizeof(next->stack)]) //lưu tạm thời đáy của stack proc đang chạy hiện tại
+      : [satp] "r" (SATP_SV39 | ((uint64_t) next->page_table / PAGE_SIZE)),
+      [sscratch] "r" ((uint64_t) &next->stack[sizeof(next->stack)]) //lưu tạm thời đáy của stack proc đang chạy hiện tại
       );
   
   struct process *prev = current_proc;
@@ -214,7 +251,7 @@ void kernel_entry(void) {
         "sd a0, 8 * 30(sp)\n"
 
         "addi a0, sp, 8 * 31\n" //reset the kernel stack
-        "csrw sscratch, s0\n"
+        "csrw sscratch, a0\n"
 
         "mv a0, sp\n"
         "call handle_trap\n" // Do mỗi proc có stack riêng rồi nên
